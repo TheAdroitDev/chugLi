@@ -11,25 +11,48 @@ const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
 const activeRooms = new Map();
+let isReady = false;
 
-app.prepare().then(() => {
-  const httpServer = createServer(async (req, res) => {
-    try {
-      // Health check endpoint for Railway
-      if (req.url === '/api/health' || req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', timestamp: Date.now() }));
-        return;
-      }
-
-      const parsedUrl = parse(req.url, true);
-      await handle(req, res, parsedUrl);
-    } catch (err) {
-      console.error('Error handling request:', err);
-      res.statusCode = 500;
-      res.end('Internal Server Error');
+// Create HTTP server FIRST (before Next.js prepares)
+const httpServer = createServer(async (req, res) => {
+  try {
+    // ALWAYS respond to health checks - even if Next.js isn't ready yet
+    if (req.url === '/api/health' || req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ 
+        status: 'ok', 
+        ready: isReady,
+        timestamp: Date.now() 
+      }));
+      return;
     }
-  });
+
+    // If Next.js isn't ready, return 503
+    if (!isReady) {
+      res.writeHead(503, { 'Content-Type': 'text/plain' });
+      res.end('Service starting...');
+      return;
+    }
+
+    const parsedUrl = parse(req.url, true);
+    await handle(req, res, parsedUrl);
+  } catch (err) {
+    console.error('Error handling request:', err);
+    res.statusCode = 500;
+    res.end('Internal Server Error');
+  }
+});
+
+// Start listening IMMEDIATELY (before Next.js prepares)
+httpServer.listen(port, hostname, () => {
+  console.log(`🚀 Server listening on http://${hostname}:${port}`);
+  console.log(`⏳ Preparing Next.js...`);
+});
+
+// Now prepare Next.js in the background
+app.prepare().then(() => {
+  console.log(`✅ Next.js ready`);
+  isReady = true;
 
   const io = new Server(httpServer, {
     cors: {
@@ -117,38 +140,31 @@ app.prepare().then(() => {
     }
   });
 
-  // Graceful shutdown
-  const gracefulShutdown = (signal) => {
-    console.log(`\n${signal} received. Closing server gracefully...`);
-    
-    httpServer.close(() => {
-      console.log('HTTP server closed');
-      io.close(() => {
-        console.log('Socket.io closed');
-        process.exit(0);
-      });
-    });
-
-    // Force close after 10 seconds
-    setTimeout(() => {
-      console.error('Forced shutdown after timeout');
-      process.exit(1);
-    }, 10000);
-  };
-
-  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-  httpServer
-    .once('error', (err) => {
-      console.error('❌ Server error:', err);
-      process.exit(1);
-    })
-    .listen(port, hostname, () => {
-      console.log(`🚀 Server ready on http://${hostname}:${port}`);
-      console.log(`✅ Health check available at /health`);
-    });
+  console.log(`✅ Socket.io ready`);
 }).catch((err) => {
-  console.error('Failed to start server:', err);
+  console.error('❌ Failed to prepare Next.js:', err);
+  process.exit(1);
+});
+
+// Graceful shutdown
+const gracefulShutdown = (signal) => {
+  console.log(`\n${signal} received. Shutting down...`);
+  
+  httpServer.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+
+  setTimeout(() => {
+    console.error('Forced shutdown');
+    process.exit(1);
+  }, 10000);
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+httpServer.on('error', (err) => {
+  console.error('❌ Server error:', err);
   process.exit(1);
 });

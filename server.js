@@ -146,23 +146,7 @@ app.prepare().then(() => {
   process.exit(1);
 });
 
-// Graceful shutdown
-const gracefulShutdown = (signal) => {
-  console.log(`\n${signal} received. Shutting down...`);
-  
-  httpServer.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
 
-  setTimeout(() => {
-    console.error('Forced shutdown');
-    process.exit(1);
-  }, 10000);
-};
-
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 httpServer.on('error', (err) => {
   console.error('❌ Server error:', err);

@@ -10,34 +10,41 @@ const port = parseInt(process.env.PORT || '3000', 10);
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
-// Track active rooms: roomId -> Map<userId, { socketId, handle }>
 const activeRooms = new Map();
 
 app.prepare().then(() => {
   const httpServer = createServer(async (req, res) => {
-    const parsedUrl = parse(req.url, true);
-    await handle(req, res, parsedUrl);
+    try {
+      // Health check endpoint for Railway
+      if (req.url === '/api/health' || req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', timestamp: Date.now() }));
+        return;
+      }
+
+      const parsedUrl = parse(req.url, true);
+      await handle(req, res, parsedUrl);
+    } catch (err) {
+      console.error('Error handling request:', err);
+      res.statusCode = 500;
+      res.end('Internal Server Error');
+    }
   });
 
   const io = new Server(httpServer, {
     cors: {
-      origin: '*', // Allow all origins for simplicity (both local and prod)
+      origin: '*',
       methods: ["GET", "POST"],
       credentials: false
     },
-    transports: ['polling', 'websocket'], // Try polling first, then upgrade to websocket
+    transports: ['polling', 'websocket'],
     allowEIO3: true,
     pingTimeout: 60000,
     pingInterval: 25000
   });
 
   io.on('connection', (socket) => {
-    console.log('✅ User connected:', socket.id);
-
-    // JOIN ROOM
     socket.on('join_room', ({ roomId, userId, handle }) => {
-      console.log(`User ${handle} (${userId}) joining room: ${roomId}`);
-      
       socket.join(roomId);
       
       if (!activeRooms.has(roomId)) {
@@ -55,14 +62,9 @@ app.prepare().then(() => {
         participantCount,
         participants: Array.from(room.values()).map(u => u.handle)
       });
-      
-      console.log(`Room ${roomId} now has ${participantCount} unique participants`);
     });
 
-    // SEND MESSAGE
     socket.on('send_message', (data) => {
-      console.log('📨 Message received:', data);
-      
       const { roomId, message, handle, id, timestamp } = data;
       
       io.to(roomId).emit('receive_message', {
@@ -75,40 +77,28 @@ app.prepare().then(() => {
       });
     });
 
-    // ADD REACTION
     socket.on('add_reaction', ({ messageId, emoji, roomId }) => {
-      console.log(`👍 Reaction: ${emoji} on message ${messageId}`);
-      
       io.to(roomId).emit('new_reaction', {
         messageId,
         emoji
       });
     });
 
-    // LEAVE ROOM
     socket.on('leave_room', (roomId) => {
-      console.log(`User leaving room: ${roomId}`);
       handleUserLeave(socket, roomId);
     });
 
-    // DELETE ROOM
     socket.on('delete_room', (roomId) => {
-      console.log(`🗑️ Room ${roomId} being deleted`);
-      
       io.to(roomId).emit('room_deleted');
       activeRooms.delete(roomId);
     });
 
-    // DISCONNECT
     socket.on('disconnect', () => {
-      console.log('❌ User disconnected:', socket.id);
-      
       if (socket.roomId && socket.userId) {
         handleUserLeave(socket, socket.roomId);
       }
     });
 
-    // Helper function to handle user leaving
     function handleUserLeave(socket, roomId) {
       if (!activeRooms.has(roomId)) return;
       
@@ -124,10 +114,30 @@ app.prepare().then(() => {
       if (room.size === 0) {
         activeRooms.delete(roomId);
       }
-      
-      console.log(`Room ${roomId} now has ${participantCount} participants`);
     }
   });
+
+  // Graceful shutdown
+  const gracefulShutdown = (signal) => {
+    console.log(`\n${signal} received. Closing server gracefully...`);
+    
+    httpServer.close(() => {
+      console.log('HTTP server closed');
+      io.close(() => {
+        console.log('Socket.io closed');
+        process.exit(0);
+      });
+    });
+
+    // Force close after 10 seconds
+    setTimeout(() => {
+      console.error('Forced shutdown after timeout');
+      process.exit(1);
+    }, 10000);
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
   httpServer
     .once('error', (err) => {
@@ -136,7 +146,9 @@ app.prepare().then(() => {
     })
     .listen(port, hostname, () => {
       console.log(`🚀 Server ready on http://${hostname}:${port}`);
-      console.log(`✅ Socket.io server running`);
-      console.log(`📍 Environment: ${dev ? 'development' : 'production'}`);
+      console.log(`✅ Health check available at /health`);
     });
+}).catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });
